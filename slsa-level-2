@@ -1,0 +1,233 @@
+package slsa.l2
+
+#
+# SLSA Level 2 compliance policy for Witness/go-witness SLSA attestations.
+#
+# This policy is a strict superset of the SLSA L1 checks:
+#   - It repeats the L1 structural requirements.
+#   - It adds extra checks on dependencies and metadata that align with
+#     SLSA Level 2 provenance content requirements.
+#
+# As with L1, only what can be derived from a single SLSA provenance
+# document is enforced here. Platform-level L2 requirements (build
+# service, non-falsifiable provenance, dependency completeness) must
+# be enforced by the CI / witness configuration.
+#
+
+default allow := false
+
+allow {
+    count(deny) == 0
+}
+
+result := {
+    "level": "SLSA_L2",
+    "compliant": allow,
+    "violations": deny,
+}
+
+# -----------------------------------------------------------------------------
+# Helpers (same as L1; duplicated so this file can stand alone)
+# -----------------------------------------------------------------------------
+
+provenance := p {
+    input.predicateType == "https://slsa.dev/provenance/v1"
+    p := input.predicate
+} else = p {
+    input.predicateType == "https://slsa.dev/provenance/v1.0"
+    p := input.predicate
+} else = p {
+    p := input
+}
+
+build_definition := bd {
+    bd := provenance.buildDefinition
+}
+
+run_details := rd {
+    rd := provenance.runDetails
+}
+
+builder := b {
+    rd := run_details
+    b := rd.builder
+}
+
+metadata := md {
+    rd := run_details
+    md := rd.metadata
+}
+
+has_field(obj, field) {
+    obj[field]
+}
+
+non_empty_string(s) {
+    s != null
+    s != ""
+}
+
+# Convenience alias for resolvedDependencies (if present).
+resolved_dependencies := deps {
+    build_definition
+    deps := build_definition.resolvedDependencies
+}
+
+# -----------------------------------------------------------------------------
+# Re-use / re-state L1 checks
+# -----------------------------------------------------------------------------
+
+deny[msg] {
+    not is_object(provenance)
+    msg := "input is not a SLSA provenance object (expected SLSA v1.0 provenance predicate or in-toto statement predicate)"
+}
+
+deny[msg] {
+    is_object(provenance)
+    not has_field(provenance, "buildDefinition")
+    msg := "missing buildDefinition required by SLSA Build L1/L2"
+}
+
+deny[msg] {
+    is_object(provenance)
+    not has_field(provenance, "runDetails")
+    msg := "missing runDetails required by SLSA Build L1/L2"
+}
+
+deny[msg] {
+    build_definition
+    not has_field(build_definition, "buildType")
+    msg := "missing buildDefinition.buildType (must identify the build type / template)"
+}
+
+deny[msg] {
+    build_definition
+    has_field(build_definition, "buildType")
+    not non_empty_string(build_definition.buildType)
+    msg := "buildDefinition.buildType must be a non-empty string"
+}
+
+deny[msg] {
+    build_definition
+    not has_field(build_definition, "externalParameters")
+    msg := "missing buildDefinition.externalParameters (must describe user-controlled parameters)"
+}
+
+deny[msg] {
+    run_details
+    not builder
+    msg := "missing runDetails.builder (must identify the build platform)"
+}
+
+deny[msg] {
+    builder
+    not has_field(builder, "id")
+    msg := "missing runDetails.builder.id"
+}
+
+deny[msg] {
+    builder
+    has_field(builder, "id")
+    not non_empty_string(builder.id)
+    msg := "runDetails.builder.id must be a non-empty string"
+}
+
+deny[msg] {
+    run_details
+    not metadata
+    msg := "missing runDetails.metadata (invocationId / startedOn / finishedOn)"
+}
+
+deny[msg] {
+    metadata
+    not has_field(metadata, "invocationId")
+    msg := "missing runDetails.metadata.invocationId"
+}
+
+deny[msg] {
+    metadata
+    has_field(metadata, "invocationId")
+    not non_empty_string(metadata.invocationId)
+    msg := "runDetails.metadata.invocationId must be a non-empty string"
+}
+
+deny[msg] {
+    metadata
+    not has_field(metadata, "startedOn")
+    msg := "missing runDetails.metadata.startedOn"
+}
+
+deny[msg] {
+    metadata
+    not has_field(metadata, "finishedOn")
+    msg := "missing runDetails.metadata.finishedOn"
+}
+
+# -----------------------------------------------------------------------------
+# Additional L2-ish checks (dependencies & richer metadata)
+# -----------------------------------------------------------------------------
+
+# 1. L2 expects provenance to include dependencies; require resolvedDependencies.
+deny[msg] {
+    build_definition
+    not has_field(build_definition, "resolvedDependencies")
+    msg := "missing buildDefinition.resolvedDependencies (L2 expects dependencies to be recorded)"
+}
+
+# resolvedDependencies MUST NOT be an empty list.
+deny[msg] {
+    resolved_dependencies
+    resolved_dependencies == []
+    msg := "buildDefinition.resolvedDependencies must not be empty at SLSA L2"
+}
+
+# Each dependency should have a non-empty digest map.
+deny[msg] {
+    resolved_dependencies
+    some i
+    dep := resolved_dependencies[i]
+    not has_field(dep, "digest")
+    msg := sprintf("resolvedDependencies[%v] is missing digest field", [i])
+}
+
+deny[msg] {
+    resolved_dependencies
+    some i
+    dep := resolved_dependencies[i]
+    has_field(dep, "digest")
+    dep.digest == {}
+    msg := sprintf("resolvedDependencies[%v].digest must not be empty", [i])
+}
+
+# Each dependency should have a non-empty uri (helps satisfy “identifies source/dependencies”).
+deny[msg] {
+    resolved_dependencies
+    some i
+    dep := resolved_dependencies[i]
+    not has_field(dep, "uri")
+    msg := sprintf("resolvedDependencies[%v] is missing uri field", [i])
+}
+
+deny[msg] {
+    resolved_dependencies
+    some i
+    dep := resolved_dependencies[i]
+    has_field(dep, "uri")
+    not non_empty_string(dep.uri)
+    msg := sprintf("resolvedDependencies[%v].uri must be a non-empty string", [i])
+}
+
+# 2. Tighten metadata: startedOn / finishedOn should be non-empty.
+deny[msg] {
+    metadata
+    has_field(metadata, "startedOn")
+    not non_empty_string(metadata.startedOn)
+    msg := "runDetails.metadata.startedOn must be a non-empty timestamp string"
+}
+
+deny[msg] {
+    metadata
+    has_field(metadata, "finishedOn")
+    not non_empty_string(metadata.finishedOn)
+    msg := "runDetails.metadata.finishedOn must be a non-empty timestamp string"
+}
