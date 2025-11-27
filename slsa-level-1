@@ -1,0 +1,186 @@
+package slsa.l1
+
+#
+# SLSA Level 1 compliance policy for Witness/go-witness SLSA attestations.
+#
+# Input:
+#   - Either a full in-toto Statement wrapping SLSA Provenance v1:
+#       {
+#         "_type": "https://in-toto.io/Statement/v1",
+#         "subject": [ ... ],
+#         "predicateType": "https://slsa.dev/provenance/v1",
+#         "predicate": {
+#           "buildDefinition": { ... },
+#           "runDetails": { ... }
+#         }
+#       }
+#   - Or the bare SLSA provenance predicate (what go-witness usually passes):
+#       {
+#         "buildDefinition": { ... },
+#         "runDetails": { ... }
+#       }
+#
+# Result model:
+#   - deny[msg]  : set of human-readable violation messages.
+#   - allow      : true iff no violations.
+#   - result     : convenience object for tooling / debugging.
+#
+# NOTE: This policy enforces only the parts of SLSA L1 that are
+#       observable in a single provenance document. Platform-level
+#       guarantees (scripted build, service-generated provenance, etc.)
+#       must be enforced outside of Rego.
+
+default allow := false
+
+allow {
+    count(deny) == 0
+}
+
+result := {
+    "level": "SLSA_L1",
+    "compliant": allow,
+    "violations": deny,
+}
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+# Normalize input: always expose the provenance predicate as `provenance`.
+provenance := p {
+    # Case 1: full in-toto Statement (predicateType without minor version)
+    input.predicateType == "https://slsa.dev/provenance/v1"
+    p := input.predicate
+} else = p {
+    # Case 1b: full in-toto Statement (explicit v1.0)
+    input.predicateType == "https://slsa.dev/provenance/v1.0"
+    p := input.predicate
+} else = p {
+    # Case 2: bare provenance predicate
+    p := input
+}
+
+build_definition := bd {
+    bd := provenance.buildDefinition
+}
+
+run_details := rd {
+    rd := provenance.runDetails
+}
+
+builder := b {
+    rd := run_details
+    b := rd.builder
+}
+
+metadata := md {
+    rd := run_details
+    md := rd.metadata
+}
+
+# obj has key `field`?
+has_field(obj, field) {
+    obj[field]
+}
+
+# s is a non-empty string
+non_empty_string(s) {
+    s != null
+    s != ""
+}
+
+# -----------------------------------------------------------------------------
+# Core structural checks for SLSA L1
+# -----------------------------------------------------------------------------
+
+# 1. Input must look like a SLSA provenance object.
+deny[msg] {
+    not is_object(provenance)
+    msg := "input is not a SLSA provenance object (expected SLSA v1.0 provenance predicate or in-toto statement predicate)"
+}
+
+# 2. Provenance MUST contain buildDefinition and runDetails.
+deny[msg] {
+    is_object(provenance)
+    not has_field(provenance, "buildDefinition")
+    msg := "missing buildDefinition required by SLSA Build L1"
+}
+
+deny[msg] {
+    is_object(provenance)
+    not has_field(provenance, "runDetails")
+    msg := "missing runDetails required by SLSA Build L1"
+}
+
+# 3. buildDefinition.buildType MUST be present and non-empty.
+deny[msg] {
+    build_definition
+    not has_field(build_definition, "buildType")
+    msg := "missing buildDefinition.buildType (must identify the build type / template)"
+}
+
+deny[msg] {
+    build_definition
+    has_field(build_definition, "buildType")
+    not non_empty_string(build_definition.buildType)
+    msg := "buildDefinition.buildType must be a non-empty string"
+}
+
+# 4. buildDefinition.externalParameters MUST exist (even if empty).
+deny[msg] {
+    build_definition
+    not has_field(build_definition, "externalParameters")
+    msg := "missing buildDefinition.externalParameters (must describe user-controlled parameters)"
+}
+
+# 5. runDetails.builder.id MUST be present and non-empty.
+deny[msg] {
+    run_details
+    not builder
+    msg := "missing runDetails.builder (must identify the build platform)"
+}
+
+deny[msg] {
+    builder
+    not has_field(builder, "id")
+    msg := "missing runDetails.builder.id"
+}
+
+deny[msg] {
+    builder
+    has_field(builder, "id")
+    not non_empty_string(builder.id)
+    msg := "runDetails.builder.id must be a non-empty string"
+}
+
+# 6. runDetails.metadata MUST include invocationId and timestamps.
+deny[msg] {
+    run_details
+    not metadata
+    msg := "missing runDetails.metadata (invocationId / startedOn / finishedOn)"
+}
+
+deny[msg] {
+    metadata
+    not has_field(metadata, "invocationId")
+    msg := "missing runDetails.metadata.invocationId"
+}
+
+deny[msg] {
+    metadata
+    has_field(metadata, "invocationId")
+    not non_empty_string(metadata.invocationId)
+    msg := "runDetails.metadata.invocationId must be a non-empty string"
+}
+
+deny[msg] {
+    metadata
+    not has_field(metadata, "startedOn")
+    msg := "missing runDetails.metadata.startedOn"
+}
+
+deny[msg] {
+    metadata
+    not has_field(metadata, "finishedOn")
+    msg := "missing runDetails.metadata.finishedOn"
+}
