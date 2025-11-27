@@ -1,0 +1,268 @@
+package slsa.git
+
+#
+# METADATA
+# title: SLSA-style Git checks (L1 & L2)
+# description: >
+#   Evaluate Witness Git attestor data against SLSA-inspired source/build rules
+#   for Levels 1 and 2. Assumes input is the Git attestor JSON payload.
+# custom:
+#   slsa_track: "source"
+#   slsa_levels: [1, 2]
+#   attestor: "git"
+#   notes: |
+#     This policy only sees Git metadata. It cannot prove all SLSA requirements
+#     (e.g., long-term retention, SCS access controls) but it enforces the
+#     portions that are observable from the Git attestation: version control,
+#     unique revision ID, commit metadata, and basic repository layout.
+#
+
+############################
+# Entrypoints
+############################
+
+default allow_l1 := false
+default allow_l2 := false
+
+# SLSA L1-style: basic version control + unique revision and author metadata.
+allow_l1 {
+    count(deny_l1) == 0
+}
+
+# SLSA L2-style: all L1 checks plus hosted/remote repo + extra integrity hints.
+allow_l2 {
+    count(deny_l2) == 0
+}
+
+# Human-readable failures for each level.
+deny_l1[msg] {
+    msg := errors_l1[_]
+}
+
+deny_l2[msg] {
+    msg := errors_l2[_]
+}
+
+############################
+# Error aggregation
+############################
+
+# Common checks shared by all SLSA levels that use Git attestation.
+common_errors[msg] {
+    not is_object(input)
+    msg := "input must be a Git attestor JSON object"
+}
+
+common_errors[msg] {
+    not required_field_nonempty("gittool")
+    msg := "gittool must be present and non-empty (evidence that Git is being used as VCS)"
+}
+
+common_errors[msg] {
+    not valid_commit_hash
+    msg := sprintf("commithash %q is missing or malformed; expected 40 lowercase hex characters", [input.commithash])
+}
+
+common_errors[msg] {
+    not required_field_nonempty("author")
+    msg := "author must be present for the selected revision"
+}
+
+common_errors[msg] {
+    not required_field_nonempty("authoremail")
+    msg := "authoremail must be present for the selected revision"
+}
+
+common_errors[msg] {
+    not required_field_nonempty("committername")
+    msg := "committername must be present for the selected revision"
+}
+
+common_errors[msg] {
+    not required_field_nonempty("committeremail")
+    msg := "committeremail must be present for the selected revision"
+}
+
+common_errors[msg] {
+    not required_field_nonempty("commitdate")
+    msg := "commitdate must be present for the selected revision"
+}
+
+common_errors[msg] {
+    not required_field_nonempty("commitmessage")
+    msg := "commitmessage must be present for the selected revision"
+}
+
+common_errors[msg] {
+    not required_field_nonempty("branch")
+    msg := "branch must be present; builds should run from a named reference rather than detached HEAD"
+}
+
+# L1 errors: today this is just “common” Git/SLSA source metadata.
+errors_l1[msg] {
+    msg := common_errors[_]
+}
+
+# Extra checks we treat as SLSA-ish Level 2 (on top of common checks).
+additional_errors_l2[msg] {
+    not has_remote
+    msg := "at least one Git remote URL must be present; SLSA 2 assumes a hosted, shared repository"
+}
+
+additional_errors_l2[msg] {
+    not has_refs
+    msg := "at least one Git ref (branch or tag) should point at this commit"
+}
+
+additional_errors_l2[msg] {
+    not has_commit_digest
+    msg := "commitdigest must contain at least one entry (e.g., sha1 or sha256) for the revision"
+}
+
+# This is closer to SLSA “verified history”; treat as a strong recommendation.
+additional_errors_l2[msg] {
+    enforce_signed_commits
+    not has_commit_signature
+    msg := "commit signature is missing; enable signed commits on protected branches to strengthen source integrity"
+}
+
+# Optional: require a clean working tree. Disabled by default to avoid
+# surprising failures in repos that legitimately build from dirty trees.
+additional_errors_l2[msg] {
+    enforce_clean_worktree
+    has_uncommitted_changes
+    msg := "working tree has uncommitted changes; for SLSA 2 builds, prefer building from a clean revision"
+}
+
+# L2 errors = common + additional.
+errors_l2[msg] {
+    msg := common_errors[_]
+}
+
+errors_l2[msg] {
+    msg := additional_errors_l2[_]
+}
+
+############################
+# Policy configuration “toggles”
+############################
+
+# Set these to true in your copy of the policy if you want stricter behavior.
+
+# Require commits to be signed to pass L2.
+enforce_signed_commits := false
+
+# Require the working tree to be clean to pass L2.
+enforce_clean_worktree := false
+
+############################
+# Helpers: structural checks
+############################
+
+# Git remotes present?
+has_remote {
+    is_array(input.remotes)
+    count(input.remotes) > 0
+}
+
+# At least one ref (branch or tag) is associated with this commit.
+# Git attestor exposes the refs pointing at the current commit.
+has_refs {
+    is_array(input.refs)
+    count(input.refs) > 0
+}
+
+# commitdigest present and non-empty (map of algo -> digest).
+has_commit_digest {
+    is_object(input.commitdigest)
+    count(input.commitdigest) > 0
+}
+
+# Simple check that a Git commit signature field is non-empty.
+has_commit_signature {
+    required_field_nonempty("signature")
+}
+
+############################
+# Helpers: working tree state (optional)
+############################
+
+# True if there are any staged or unstaged changes recorded in status.
+has_uncommitted_changes {
+    is_object(input.status)
+    some path
+    st := input.status[path]
+    not is_blank(st.staging)  # staged changes
+} {
+    is_object(input.status)
+    some path
+    st := input.status[path]
+    not is_blank(st.worktree) # unstaged changes
+}
+
+is_blank(s) {
+    s == null
+}
+
+is_blank(s) {
+    is_string(s)
+    trim_space(s) == ""
+}
+
+############################
+# Helpers: generic field checks
+############################
+
+# Returns true when input[field] exists and is a non-empty string.
+required_field_nonempty(field) {
+    is_object(input)
+    val := input[field]
+    is_non_empty_string(val)
+}
+
+is_non_empty_string(x) {
+    is_string(x)
+    trim_space(x) != ""
+}
+
+# Commit hash should be 40 lowercase hex characters.
+valid_commit_hash {
+    required_field_nonempty("commithash")
+    regex.match("^[0-9a-f]{40}$", input.commithash)
+}
+
+############################
+# Convenience summaries
+############################
+
+# Normalized views that callers can inspect if they don't just use allow_*/deny_*.
+
+summary_l1 := {
+    "slsa_track": "source",
+    "slsa_level": 1,
+    "attestor": "git",
+    "commithash": input.commithash,
+    "branch": input.branch,
+    "author": input.author,
+    "authoremail": input.authoremail,
+    "committername": input.committername,
+    "committeremail": input.committeremail,
+    "has_errors": count(deny_l1) > 0,
+    "errors": deny_l1,
+}
+
+summary_l2 := {
+    "slsa_track": "source",
+    "slsa_level": 2,
+    "attestor": "git",
+    "commithash": input.commithash,
+    "branch": input.branch,
+    "author": input.author,
+    "authoremail": input.authoremail,
+    "committername": input.committername,
+    "committeremail": input.committeremail,
+    "remotes": input.remotes,
+    "refs": input.refs,
+    "has_errors": count(deny_l2) > 0,
+    "errors": deny_l2,
+}
